@@ -2,7 +2,7 @@
 
 # Install packages
 sudo apt update
-sudo apt upgrade -y
+sudo NEEDRESTART_MODE=a apt upgrade -y
 sudo apt install -y figlet
 # TODO: k3s, docker, etc
 
