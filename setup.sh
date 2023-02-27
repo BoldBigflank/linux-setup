@@ -23,3 +23,7 @@ sudo cat /sys/firmware/devicetree/base/model \
 
 # Don't need figlet for an extended time
 sudo apt uninstall figlet
+
+# Git username/email config
+
+# Git branch in PROMPT
