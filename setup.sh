@@ -27,3 +27,6 @@ sudo apt uninstall figlet
 # Git username/email config
 
 # Git branch in PROMPT
+
+# Make cls clear the screen
+echo "alias cls='printf \"\033c\"'" >> ~/.bashrc
