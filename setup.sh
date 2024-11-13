@@ -34,7 +34,7 @@ if [[ $RESULT =~ 2 ]]; then
     | sudo tee /etc/motd
 
     # Don't need figlet for an extended time
-    sudo apt uninstall figlet
+    sudo apt remove figlet
 fi
 
 if [[ $RESULT =~ 3 ]]; then
@@ -48,7 +48,7 @@ if [[ $RESULT =~ 4 ]]; then
     touch ~/.ssh/authorized_keys
     PUBLIC_KEY=AAAAB3NzaC1yc2EAAAADAQABAAABAQDmj4g00bh3y2megexhBpJ4dNnaH14WlszHVOQL5HrodZ20+l7m3pwB++qoV63GTDSeNUkr4MYWW45x6JJgjI2yRCEPYMrSgZxpV/GsNmF60HTVICgxqpobDwpkEodfah66BhV7PYvNDVjo3wJSjzr1WmI20EZkyREGHgZYD97CtcbvI2JB5YgMlhynMNf0+Lip8Ygy8Hy6XZrPMBNQvwSOkjoYUzAiDT5a34m7eLf/GJdT+9iGEIYdg3rWjxdc9emjFb+b9wwK6tldOc2TwZF1RJTwhh/F5vzOEZK/zPPyL+BLXy0gNNLCOYCbR+Sub88M8pSx7zTIx8x3JcnydpXf
     if grep -q $PUBLIC_KEY ~/.ssh/authorized_keys; then
-        echo "Public key already in authorized_keys"
+        echo " - Public key already in authorized_keys"
     else
         echo "ssh-rsa $PUBLIC_KEY alex@Alex-PC" >> ~/.ssh/authorized_keys
     fi
@@ -62,9 +62,13 @@ if [[ $RESULT =~ 5 ]]; then
 fi
 
 if [[ $RESULT =~ 6 ]]; then
+    # Make cls clear the screen
     echo "SETTING CLS ALIAS"
-    # # Make cls clear the screen
-    echo "alias cls='printf \"\033c\"'" >> ~/.bashrc
+    if grep -q "alias cls" ~/.bashrc; then
+        echo " - Alias already exists"
+    else
+        (echo ""; echo "alias cls='printf \"\033c\"'") >> ~/.bashrc
+    fi
 fi
 
 rm $TMPFILE
