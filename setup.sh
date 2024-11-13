@@ -68,6 +68,7 @@ if [[ $RESULT =~ 6 ]]; then
         echo " - Alias already exists"
     else
         (echo ""; echo "alias cls='printf \"\033c\"'") >> ~/.bashrc
+        source ~/.bashrc
     fi
 fi
 
