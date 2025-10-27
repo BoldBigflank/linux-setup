@@ -7,13 +7,14 @@ sudo apt install -y dialog
 # # TODO: k3s, docker, etc
 TMPFILE=$(mktemp)
 
-dialog --checklist "Choose fixes:" 15 45 6 \
+dialog --checklist "Choose fixes:" 15 45 7 \
         1 "apt upgrade" on \
         2 "motd" on \
         3 "git branch in PROMPT" off \
         4 "ssh public key" on \
         5 "git username/email config" on \
-        6 "cls alias" on 2> $TMPFILE
+        6 "cls alias" on \
+        7 "NFS mount to Comeau" off 2> $TMPFILE
 
 RESULT=$(cat $TMPFILE)
 
@@ -69,6 +70,38 @@ if [[ $RESULT =~ 6 ]]; then
     else
         (echo ""; echo "alias cls='printf \"\033c\"'") >> ~/.bashrc
         source ~/.bashrc
+    fi
+fi
+
+if [[ $RESULT =~ 7 ]]; then
+    echo "SETTING UP NFS MOUNT TO COMEAU"
+    
+    # Install NFS client if not already installed
+    sudo apt install -y nfs-common
+    
+    # Create mount point
+    sudo mkdir -p /nfs/public
+    
+    # Define the NFS mount entry
+    NFS_ENTRY="192.168.7.47:/Public /nfs/public nfs nofail,defaults,rw,user 0 0"
+    
+    # Check if entry already exists in fstab
+    if grep -q "192.168.7.47:/Public" /etc/fstab; then
+        echo " - NFS entry already in /etc/fstab"
+    else
+        echo " - Adding NFS entry to /etc/fstab"
+        echo "$NFS_ENTRY" | sudo tee -a /etc/fstab
+    fi
+    
+    # Mount the NFS share
+    echo " - Mounting NFS share"
+    sudo mount -a
+    
+    # Verify the mount
+    if mountpoint -q /nfs/public; then
+        echo " - Successfully mounted /nfs/public"
+    else
+        echo " - Warning: Mount point /nfs/public is not mounted"
     fi
 fi
 
