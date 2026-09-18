@@ -83,7 +83,7 @@ if [[ $RESULT =~ 7 ]]; then
     sudo mkdir -p /nfs/public
     
     # Define the NFS mount entry
-    NFS_ENTRY="192.168.7.47:/Public /nfs/public nfs nofail,defaults,rw,user 0 0"
+    NFS_ENTRY="192.168.7.47:/Public /nfs/public nfs _netdev,x-systemd.automount,x-systemd.mount-timeout=90,hard,intr,timeo=30,retrans=3,rw 0 0"
     
     # Check if entry already exists in fstab
     if grep -q "192.168.7.47:/Public" /etc/fstab; then
