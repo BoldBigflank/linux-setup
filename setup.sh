@@ -1,109 +1,181 @@
 #!/bin/bash
+set -euo pipefail
 
-# # Install packages
-sudo apt update
-# sudo NEEDRESTART_MODE=a apt upgrade -y
-sudo apt install -y dialog
-# # TODO: k3s, docker, etc
+# ----------------------------------------------------------------------------
+# CONFIG — edit these for your own setup before running.
+# Consider moving this block to a separate config.sh (and gitignoring it)
+# if you ever share this repo, since it currently bakes in a personal
+# SSH key, NFS server IP, and git identity.
+# ----------------------------------------------------------------------------
+GIT_USER_NAME="Alex Swan"
+GIT_USER_EMAIL="smashcubed@gmail.com"
+SSH_PUBLIC_KEY="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDmj4g00bh3y2megexhBpJ4dNnaH14WlszHVOQL5HrodZ20+l7m3pwB++qoV63GTDSeNUkr4MYWW45x6JJgjI2yRCEPYMrSgZxpV/GsNmF60HTVICgxqpobDwpkEodfah66BhV7PYvNDVjo3wJSjzr1WmI20EZkyREGHgZYD97CtcbvI2JB5YgMlhynMNf0+Lip8Ygy8Hy6XZrPMBNQvwSOkjoYUzAiDT5a34m7eLf/GJdT+9iGEIYdg3rWjxdc9emjFb+b9wwK6tldOc2TwZF1RJTwhh/F5vzOEZK/zPPyL+BLXy0gNNLCOYCbR+Sub88M8pSx7zTIx8x3JcnydpXf alex@Alex-PC"
+NFS_SERVER="192.168.7.47"
+NFS_REMOTE_PATH="/Public"
+NFS_LOCAL_MOUNT="/nfs/public"
+
+export DEBIAN_FRONTEND=noninteractive
+
 TMPFILE=$(mktemp)
+trap 'rm -f "$TMPFILE"' EXIT
 
-dialog --checklist "Choose fixes:" 15 45 7 \
-        1 "apt upgrade" on \
-        2 "motd" on \
-        3 "git branch in PROMPT" off \
-        4 "ssh public key" on \
-        5 "git username/email config" on \
-        6 "cls alias" on \
-        7 "NFS mount to Comeau" off 2> $TMPFILE
+# ----------------------------------------------------------------------------
+# Base packages
+# ----------------------------------------------------------------------------
+sudo apt update
+sudo apt install -y -qq dialog
 
-RESULT=$(cat $TMPFILE)
+# ----------------------------------------------------------------------------
+# Checklist — tags are names now, not numbers, so nothing can collide
+# (e.g. "1" matching inside "10") and it's easy to add new items.
+# ----------------------------------------------------------------------------
+dialog --checklist "Choose fixes:" 18 60 10 \
+    upgrade   "apt upgrade"              on \
+    motd      "motd"                     on \
+    gitprompt "git branch in PROMPT"     off \
+    sshkey    "ssh public key"           on \
+    gitconfig "git username/email"       on \
+    cls       "cls alias"                on \
+    nfs       "NFS mount to Comeau"      off \
+    docker    "install docker"           off \
+    k3s       "install k3s"              off \
+    unattended "unattended-upgrades"     off \
+    2> "$TMPFILE"
 
-if [[ $RESULT =~ 1 ]]; then
+RESULT=$(cat "$TMPFILE")
+
+has() {
+    # word-boundary match against the space-separated dialog result
+    [[ " $RESULT " == *" $1 "* ]]
+}
+
+# ----------------------------------------------------------------------------
+# Task functions
+# ----------------------------------------------------------------------------
+
+do_upgrade() {
     echo "APT UPGRADE"
-    sudo NEEDRESTART_MODE=a apt upgrade -y
-fi
+    sudo apt upgrade -y
+}
 
-if [[ $RESULT =~ 2 ]]; then
+do_motd() {
     echo "SETTING MESSAGE OF THE DAY"
-    sudo apt install -y figlet
+    sudo apt install -y -qq figlet
+    cat /sys/firmware/devicetree/base/model \
+        | sed -E 's/Raspberry Pi /Rpi/g' \
+        | sed -E 's/Model //g' \
+        | figlet -f slant \
+        | sudo tee /etc/motd > /dev/null
+    sudo apt remove -y -qq figlet
+}
 
-    # Create a motd with figlet
-    sudo cat /sys/firmware/devicetree/base/model \
-    | sed -E 's/Raspberry Pi /Rpi/g' \
-    | sed -E 's/Model //g' \
-    | figlet -f slant \
-    | sudo tee /etc/motd
+do_gitprompt() {
+    echo "ADDING GIT BRANCH TO PROMPT"
+    local marker="# git branch in prompt (setup.sh)"
+    if grep -qF "$marker" ~/.bashrc; then
+        echo " - Already configured"
+    else
+        cat >> ~/.bashrc <<'EOF'
 
-    # Don't need figlet for an extended time
-    sudo apt remove figlet
-fi
+# git branch in prompt (setup.sh)
+parse_git_branch() {
+    git branch 2>/dev/null | sed -n '/\* /s///p' | sed 's/^/(/;s/$/)/'
+}
+export PS1="\u@\h:\w\[\033[32m\]\$(parse_git_branch)\[\033[00m\]\$ "
+EOF
+    fi
+}
 
-if [[ $RESULT =~ 3 ]]; then
-    echo "TODO: ADDING GIT BRANCH IN PROMPT"
-    # # Git branch in PROMPT
-fi
-
-if [[ $RESULT =~ 4 ]]; then
-    echo "ADDING ALEX-PC TO AUTHORIZED KEYS"
+do_sshkey() {
+    echo "ADDING PUBLIC KEY TO AUTHORIZED_KEYS"
     mkdir -p ~/.ssh
+    chmod 700 ~/.ssh
     touch ~/.ssh/authorized_keys
-    PUBLIC_KEY=AAAAB3NzaC1yc2EAAAADAQABAAABAQDmj4g00bh3y2megexhBpJ4dNnaH14WlszHVOQL5HrodZ20+l7m3pwB++qoV63GTDSeNUkr4MYWW45x6JJgjI2yRCEPYMrSgZxpV/GsNmF60HTVICgxqpobDwpkEodfah66BhV7PYvNDVjo3wJSjzr1WmI20EZkyREGHgZYD97CtcbvI2JB5YgMlhynMNf0+Lip8Ygy8Hy6XZrPMBNQvwSOkjoYUzAiDT5a34m7eLf/GJdT+9iGEIYdg3rWjxdc9emjFb+b9wwK6tldOc2TwZF1RJTwhh/F5vzOEZK/zPPyL+BLXy0gNNLCOYCbR+Sub88M8pSx7zTIx8x3JcnydpXf
-    if grep -q $PUBLIC_KEY ~/.ssh/authorized_keys; then
+    chmod 600 ~/.ssh/authorized_keys
+    if grep -qF "$SSH_PUBLIC_KEY" ~/.ssh/authorized_keys; then
         echo " - Public key already in authorized_keys"
     else
-        echo "ssh-rsa $PUBLIC_KEY alex@Alex-PC" >> ~/.ssh/authorized_keys
+        echo "$SSH_PUBLIC_KEY" >> ~/.ssh/authorized_keys
     fi
-fi
+}
 
-if [[ $RESULT =~ 5 ]]; then
+do_gitconfig() {
     echo "SETTING GIT USERNAME/EMAIL"
-    # # Git username/email config
-    git config --global user.name "Alex Swan"
-    git config --global user.email "smashcubed@gmail.com"
-fi
+    git config --global user.name "$GIT_USER_NAME"
+    git config --global user.email "$GIT_USER_EMAIL"
+}
 
-if [[ $RESULT =~ 6 ]]; then
-    # Make cls clear the screen
+do_cls() {
     echo "SETTING CLS ALIAS"
     if grep -q "alias cls" ~/.bashrc; then
         echo " - Alias already exists"
     else
-        (echo ""; echo "alias cls='printf \"\033c\"'") >> ~/.bashrc
-        source ~/.bashrc
+        { echo ""; echo "alias cls='printf \"\033c\"'"; } >> ~/.bashrc
     fi
-fi
+}
 
-if [[ $RESULT =~ 7 ]]; then
+do_nfs() {
     echo "SETTING UP NFS MOUNT TO COMEAU"
-    
-    # Install NFS client if not already installed
-    sudo apt install -y nfs-common
-    
-    # Create mount point
-    sudo mkdir -p /nfs/public
-    
-    # Define the NFS mount entry
-    NFS_ENTRY="192.168.7.47:/Public /nfs/public nfs _netdev,x-systemd.automount,x-systemd.mount-timeout=90,hard,intr,timeo=30,retrans=3,rw 0 0"
-    
-    # Check if entry already exists in fstab
-    if grep -q "192.168.7.47:/Public" /etc/fstab; then
+    sudo apt install -y -qq nfs-common
+    sudo mkdir -p "$NFS_LOCAL_MOUNT"
+
+    local nfs_entry="${NFS_SERVER}:${NFS_REMOTE_PATH} ${NFS_LOCAL_MOUNT} nfs _netdev,x-systemd.automount,x-systemd.mount-timeout=90,hard,intr,timeo=30,retrans=3,rw 0 0"
+
+    if grep -q "${NFS_SERVER}:${NFS_REMOTE_PATH}" /etc/fstab; then
         echo " - NFS entry already in /etc/fstab"
     else
         echo " - Adding NFS entry to /etc/fstab"
-        echo "$NFS_ENTRY" | sudo tee -a /etc/fstab
+        echo "$nfs_entry" | sudo tee -a /etc/fstab > /dev/null
     fi
-    
-    # Mount the NFS share
+
     echo " - Mounting NFS share"
     sudo mount -a
-    
-    # Verify the mount
-    if mountpoint -q /nfs/public; then
-        echo " - Successfully mounted /nfs/public"
-    else
-        echo " - Warning: Mount point /nfs/public is not mounted"
-    fi
-fi
 
-rm $TMPFILE
+    if mountpoint -q "$NFS_LOCAL_MOUNT"; then
+        echo " - Successfully mounted $NFS_LOCAL_MOUNT"
+    else
+        echo " - Warning: $NFS_LOCAL_MOUNT is not mounted"
+    fi
+}
+
+do_docker() {
+    echo "INSTALLING DOCKER"
+    if command -v docker &> /dev/null; then
+        echo " - Docker already installed"
+    else
+        curl -fsSL https://get.docker.com | sh
+        sudo usermod -aG docker "$USER"
+        echo " - Added $USER to the docker group (log out/in for it to take effect)"
+    fi
+}
+
+do_k3s() {
+    echo "INSTALLING K3S"
+    if command -v k3s &> /dev/null; then
+        echo " - k3s already installed"
+    else
+        curl -sfL https://get.k3s.io | sh -
+    fi
+}
+
+do_unattended() {
+    echo "ENABLING UNATTENDED-UPGRADES"
+    sudo apt install -y -qq unattended-upgrades
+    sudo dpkg-reconfigure -f noninteractive unattended-upgrades
+}
+
+# ----------------------------------------------------------------------------
+# Run whatever was selected
+# ----------------------------------------------------------------------------
+has upgrade    && do_upgrade
+has motd       && do_motd
+has gitprompt  && do_gitprompt
+has sshkey     && do_sshkey
+has gitconfig  && do_gitconfig
+has cls        && do_cls
+has nfs        && do_nfs
+has docker     && do_docker
+has k3s        && do_k3s
+has unattended && do_unattended
+
 echo "DONE"
