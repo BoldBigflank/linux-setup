@@ -11,8 +11,10 @@ GIT_USER_NAME="Alex Swan"
 GIT_USER_EMAIL="smashcubed@gmail.com"
 SSH_PUBLIC_KEY="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDmj4g00bh3y2megexhBpJ4dNnaH14WlszHVOQL5HrodZ20+l7m3pwB++qoV63GTDSeNUkr4MYWW45x6JJgjI2yRCEPYMrSgZxpV/GsNmF60HTVICgxqpobDwpkEodfah66BhV7PYvNDVjo3wJSjzr1WmI20EZkyREGHgZYD97CtcbvI2JB5YgMlhynMNf0+Lip8Ygy8Hy6XZrPMBNQvwSOkjoYUzAiDT5a34m7eLf/GJdT+9iGEIYdg3rWjxdc9emjFb+b9wwK6tldOc2TwZF1RJTwhh/F5vzOEZK/zPPyL+BLXy0gNNLCOYCbR+Sub88M8pSx7zTIx8x3JcnydpXf alex@Alex-PC"
 NFS_SERVER="192.168.7.47"
-NFS_REMOTE_PATH="/Public"
-NFS_LOCAL_MOUNT="/nfs/public"
+NFS_PUBLIC_REMOTE="/Public"
+NFS_PUBLIC_LOCAL="/nfs/public"
+NFS_DOWNLOADS_REMOTE="/Downloads"
+NFS_DOWNLOADS_LOCAL="/nfs/downloads"
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -29,17 +31,18 @@ sudo apt install -y -qq dialog
 # Checklist — tags are names now, not numbers, so nothing can collide
 # (e.g. "1" matching inside "10") and it's easy to add new items.
 # ----------------------------------------------------------------------------
-dialog --checklist "Choose fixes:" 18 60 10 \
-    upgrade   "apt upgrade"              on \
-    motd      "motd"                     on \
-    gitprompt "git branch in PROMPT"     off \
-    sshkey    "ssh public key"           on \
-    gitconfig "git username/email"       on \
-    cls       "cls alias"                on \
-    nfs       "NFS mount to Comeau"      off \
-    docker    "install docker"           off \
-    k3s       "install k3s"              off \
-    unattended "unattended-upgrades"     off \
+dialog --checklist "Choose fixes:" 20 62 11 \
+    upgrade      "apt upgrade"                  on \
+    motd         "motd"                         on \
+    gitprompt    "git branch in PROMPT"         off \
+    sshkey       "ssh public key"               on \
+    gitconfig    "git username/email"           on \
+    cls          "cls alias"                    on \
+    nfspublic    "NFS /Public → /nfs/public"    off \
+    nfsdownloads "NFS /Downloads → /nfs/downloads" off \
+    docker       "install docker"               off \
+    k3s          "install k3s"                  off \
+    unattended   "unattended-upgrades"          off \
     2> "$TMPFILE"
 
 RESULT=$(cat "$TMPFILE")
@@ -114,14 +117,23 @@ do_cls() {
     fi
 }
 
-do_nfs() {
-    echo "SETTING UP NFS MOUNT TO COMEAU"
-    sudo apt install -y -qq nfs-common
-    sudo mkdir -p "$NFS_LOCAL_MOUNT"
+ensure_nfs_common() {
+    if ! dpkg -s nfs-common &>/dev/null; then
+        sudo apt install -y -qq nfs-common
+    fi
+}
 
-    local nfs_entry="${NFS_SERVER}:${NFS_REMOTE_PATH} ${NFS_LOCAL_MOUNT} nfs _netdev,x-systemd.automount,x-systemd.mount-timeout=90,hard,intr,timeo=30,retrans=3,rw 0 0"
+mount_nfs() {
+    local remote_path="$1"
+    local local_mount="$2"
 
-    if grep -q "${NFS_SERVER}:${NFS_REMOTE_PATH}" /etc/fstab; then
+    echo "SETTING UP NFS MOUNT ${NFS_SERVER}:${remote_path} → ${local_mount}"
+    ensure_nfs_common
+    sudo mkdir -p "$local_mount"
+
+    local nfs_entry="${NFS_SERVER}:${remote_path} ${local_mount} nfs _netdev,x-systemd.automount,x-systemd.mount-timeout=90,hard,intr,timeo=30,retrans=3,rw 0 0"
+
+    if grep -q "${NFS_SERVER}:${remote_path}" /etc/fstab; then
         echo " - NFS entry already in /etc/fstab"
     else
         echo " - Adding NFS entry to /etc/fstab"
@@ -131,10 +143,10 @@ do_nfs() {
     echo " - Mounting NFS share"
     sudo mount -a
 
-    if mountpoint -q "$NFS_LOCAL_MOUNT"; then
-        echo " - Successfully mounted $NFS_LOCAL_MOUNT"
+    if mountpoint -q "$local_mount"; then
+        echo " - Successfully mounted $local_mount"
     else
-        echo " - Warning: $NFS_LOCAL_MOUNT is not mounted"
+        echo " - Warning: $local_mount is not mounted"
     fi
 }
 
@@ -173,9 +185,10 @@ has gitprompt  && do_gitprompt
 has sshkey     && do_sshkey
 has gitconfig  && do_gitconfig
 has cls        && do_cls
-has nfs        && do_nfs
-has docker     && do_docker
-has k3s        && do_k3s
-has unattended && do_unattended
+has nfspublic    && mount_nfs "$NFS_PUBLIC_REMOTE" "$NFS_PUBLIC_LOCAL"
+has nfsdownloads && mount_nfs "$NFS_DOWNLOADS_REMOTE" "$NFS_DOWNLOADS_LOCAL"
+has docker       && do_docker
+has k3s          && do_k3s
+has unattended   && do_unattended
 
 echo "DONE"
