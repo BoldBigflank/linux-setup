@@ -20,8 +20,12 @@ LOCAL_DOMAIN="lan"
 LOCAL_DNS_SERVER="192.168.0.1"   # your DNS box (router/Pi-hole/etc.) -- update me
 
 NFS_SERVER="comeau.${LOCAL_DOMAIN}"   # hostname, resolved by local DNS
-NFS_REMOTE_PATH="/Public"
-NFS_LOCAL_MOUNT="/nfs/public"
+# Shares on $NFS_SERVER, as "remote_path:local_mount_point"
+NFS_SHARES=(
+    "/Public:/nfs/public"
+    "/Downloads:/nfs/downloads"
+)
+NFS_OPTIONS="_netdev,x-systemd.automount,x-systemd.mount-timeout=90,hard,intr,timeo=30,retrans=3,rw"
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -136,34 +140,6 @@ apt_update_once() {
     fi
 }
 
-do_fixnet() {
-    echo "MIGRATING ${OLD_SUBNET}.x -> ${NEW_SUBNET}.x REFERENCES"
-    local old_re="${OLD_SUBNET//./\\.}\\."
-    local stamp changed=0 netplan_changed=0 f
-    stamp=$(date +%Y%m%d-%H%M%S)
-
-    # Places that commonly hard-code an IP: mounts, host overrides,
-    # static IP configs (netplan on Ubuntu, dhcpcd on Raspberry Pi OS), ssh shortcuts
-    for f in /etc/fstab /etc/hosts /etc/netplan/*.yaml /etc/dhcpcd.conf "$HOME/.ssh/config"; do
-        [[ -f "$f" ]] || continue
-        if sudo grep -qE "\\b${old_re}" "$f"; then
-            echo " - Updating $f (backup: $f.bak-$stamp)"
-            sudo cp -a "$f" "$f.bak-$stamp"
-            sudo sed -i -E "s/\\b${old_re}/${NEW_SUBNET}./g" "$f"
-            sudo diff "$f.bak-$stamp" "$f" | sed 's/^/     /' || true
-            changed=1
-            [[ "$f" == /etc/netplan/* ]] && netplan_changed=1
-        fi
-    done
-
-    if (( changed == 0 )); then
-        echo " - Nothing references ${OLD_SUBNET}.x (DHCP, or already migrated)"
-    fi
-    if (( netplan_changed == 1 )); then
-        echo " - netplan config changed: run 'sudo netplan apply' (or reboot) to pick up the new address"
-    fi
-}
-
 do_dns() {
     echo "CONFIGURING LOCAL DNS (${LOCAL_DNS_SERVER}, search domain ${LOCAL_DOMAIN})"
     sudo mkdir -p /etc/systemd/resolved.conf.d
@@ -182,45 +158,77 @@ EOF
 }
 
 do_nfs() {
-    echo "SETTING UP NFS MOUNT (${NFS_SERVER})"
+    echo "SETTING UP NFS MOUNTS (${NFS_SERVER})"
     sudo apt install -y -qq nfs-common
-    sudo mkdir -p "$NFS_LOCAL_MOUNT"
-
-    local nfs_entry="${NFS_SERVER}:${NFS_REMOTE_PATH} ${NFS_LOCAL_MOUNT} nfs _netdev,x-systemd.automount,x-systemd.mount-timeout=90,hard,intr,timeo=30,retrans=3,rw 0 0"
 
     if ! getent hosts "$NFS_SERVER" > /dev/null; then
         echo " - Warning: $NFS_SERVER doesn't resolve. Run the 'local DNS' step or add a DNS record first."
     fi
 
-    # Match on the mount point (not the server) so an old entry that points at
-    # a previous IP is replaced instead of duplicated.
-    if awk -v mp="$NFS_LOCAL_MOUNT" '$2 == mp { found = 1 } END { exit !found }' /etc/fstab; then
-        if grep -qxF "$nfs_entry" /etc/fstab; then
-            echo " - NFS entry already up to date"
-        else
-            echo " - Replacing stale NFS entry for $NFS_LOCAL_MOUNT"
-            sudo cp -a /etc/fstab "/etc/fstab.bak-$(date +%Y%m%d-%H%M%S)"
-            sudo sed -i "\\|[[:space:]]${NFS_LOCAL_MOUNT}[[:space:]]|d" /etc/fstab
-            echo "$nfs_entry" | sudo tee -a /etc/fstab > /dev/null
+    # Build the exact fstab lines we want, plus a lookup of our mount points
+    local -a wanted=()
+    local -A ours=()
+    local share remote mount
+    for share in "${NFS_SHARES[@]}"; do
+        remote="${share%%:*}"
+        mount="${share#*:}"
+        wanted+=("${NFS_SERVER}:${remote} ${mount} nfs ${NFS_OPTIONS} 0 0")
+        ours["$mount"]="${NFS_SERVER}:${remote}"
+    done
+
+    # --- Remove old mounts -------------------------------------------------
+    # An fstab NFS line is "old" if it points at the old subnet, or uses one of
+    # our mount points with a different source. Lines that already match what we
+    # want are left alone, so reruns are a no-op.
+    local -a old_mountpoints=()
+    local dev mp fstype
+    while read -r dev mp fstype _; do
+        [[ "$fstype" == nfs* ]] || continue
+        if [[ "$dev" == ${OLD_SUBNET}.* ]] \
+           || { [[ -n "${ours[$mp]:-}" ]] && [[ "$dev" != "${ours[$mp]}" ]]; }; then
+            old_mountpoints+=("$mp")
         fi
-    else
-        echo " - Adding NFS entry to /etc/fstab"
-        echo "$nfs_entry" | sudo tee -a /etc/fstab > /dev/null
+    done < <(grep -vE '^[[:space:]]*(#|$)' /etc/fstab)
+
+    if (( ${#old_mountpoints[@]} > 0 )); then
+        sudo cp -a /etc/fstab "/etc/fstab.bak-$(date +%Y%m%d-%H%M%S)"
+        for mp in "${old_mountpoints[@]}"; do
+            echo " - Removing old mount: $mp"
+            # Stop the automount unit first, then lazily detach (works on a dead server)
+            sudo systemctl stop "$(systemd-escape -p --suffix=automount "$mp")" 2>/dev/null || true
+            sudo umount -l "$mp" 2>/dev/null || true
+            awk -v mp="$mp" '$1 !~ /^#/ && $2 == mp && $3 ~ /^nfs/ { next } { print }' \
+                /etc/fstab | sudo tee /etc/fstab.new > /dev/null
+            sudo mv /etc/fstab.new /etc/fstab
+        done
     fi
 
-    echo " - Mounting NFS share"
-    # Detach any mount still bound to the old address, then let systemd re-read fstab
-    sudo umount -l "$NFS_LOCAL_MOUNT" 2>/dev/null || true
+    # --- Add the new mounts ----------------------------------------------------
+    local line
+    for line in "${wanted[@]}"; do
+        mp=$(awk '{print $2}' <<< "$line")
+        sudo mkdir -p "$mp"
+        if grep -qxF "$line" /etc/fstab; then
+            echo " - $mp already up to date"
+        else
+            echo " - Adding $mp"
+            echo "$line" | sudo tee -a /etc/fstab > /dev/null
+        fi
+    done
+
+    echo " - Mounting NFS shares"
     sudo systemctl daemon-reload
     sudo mount -a || echo " - Warning: mount -a reported errors"
-    # x-systemd.automount mounts on first access, so touch it
-    ls "$NFS_LOCAL_MOUNT" > /dev/null 2>&1 || true
 
-    if mountpoint -q "$NFS_LOCAL_MOUNT"; then
-        echo " - Successfully mounted $NFS_LOCAL_MOUNT"
-    else
-        echo " - Warning: $NFS_LOCAL_MOUNT is not mounted"
-    fi
+    for mount in "${!ours[@]}"; do
+        # x-systemd.automount mounts on first access, so touch it
+        ls "$mount" > /dev/null 2>&1 || true
+        if mountpoint -q "$mount"; then
+            echo " - Mounted $mount from ${ours[$mount]}"
+        else
+            echo " - Warning: $mount is not mounted"
+        fi
+    done
 }
 
 do_docker() {
